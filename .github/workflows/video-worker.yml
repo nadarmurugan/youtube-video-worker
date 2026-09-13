@@ -44,9 +44,18 @@ jobs:
 
       - name: Check output
         run: |
+          echo "Input video:"
           ls -lh input.mp4
+
+          echo "Output video:"
           ls -lh output.mp4
-          ffprobe output.mp4
+
+          echo "Video information:"
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_name,width,height \
+            -of default=noprint_wrappers=1 \
+            output.mp4
 
       - name: Upload processed video
         uses: actions/upload-artifact@v4
