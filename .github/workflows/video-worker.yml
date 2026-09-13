@@ -1,0 +1,47 @@
+name: FFmpeg Video Worker
+
+on:
+  workflow_dispatch:
+
+jobs:
+  process-video:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Check FFmpeg
+        run: |
+          ffmpeg -version
+
+      - name: Download test video
+        run: |
+          wget -O input.mp4 \
+            https://filesamples.com/samples/video/mp4/sample_640x360.mp4
+
+      - name: Add text to video
+        run: |
+          ffmpeg \
+            -i input.mp4 \
+            -vf "drawtext=text='My AI Video':fontsize=40:x=(w-text_w)/2:y=40" \
+            -c:a copy \
+            output.mp4
+
+      - name: Check output
+        run: |
+          ls -lh input.mp4
+          ls -lh output.mp4
+          ffprobe output.mp4
+
+      - name: Upload processed video
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-video
+          path: output.mp4
