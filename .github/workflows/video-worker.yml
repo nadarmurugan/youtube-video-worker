@@ -2,98 +2,327 @@ name: FFmpeg Video Worker
 
 on:
   workflow_dispatch:
+    inputs:
+      job_id:
+        description: 'Video job ID from Apps Script / Supabase'
+        required: true
+        type: string
 
 jobs:
   process-video:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Install FFmpeg and rclone
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg jq python3-venv
           curl https://rclone.org/install.sh | sudo bash
 
       - name: Check tools
         run: |
-          ffmpeg -version
-          rclone version
+          set -e
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+          rclone version | head -n 3
+          jq --version
+          python3 --version
 
       - name: Configure rclone
         env:
-          RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
         run: |
-          mkdir -p ~/.config/rclone
-          echo "$RCLONE_CONFIG_B64" | base64 --decode > ~/.config/rclone/rclone.conf
-          chmod 600 ~/.config/rclone/rclone.conf
+          set -e
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s\n' "$RCLONE_CONFIG" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          echo "Configured remotes:"
+          rclone listremotes
 
       - name: Test Google Drive
         run: |
+          set -e
           rclone lsd gdrive:
+          rclone lsd "gdrive:AI VIDEO AUTOMATION"
 
-      - name: Download test input from Google Drive
+      - name: Prepare job variables
+        env:
+          JOB_ID: ${{ inputs.job_id }}
         run: |
-          mkdir -p input
-          rclone copy "gdrive:AI VIDEO AUTOMATION" ./input --progress
+          set -e
+          echo "JOB_ID=$JOB_ID" >> "$GITHUB_ENV"
+          echo "JOB_FOLDER=job_$JOB_ID" >> "$GITHUB_ENV"
+          echo "CLIP_SOURCE=gdrive:AI VIDEO AUTOMATION/02_AI_ASSETS/VIDEO_CLIPS/job_$JOB_ID" >> "$GITHUB_ENV"
+          echo "PLAN_SOURCE=gdrive:AI VIDEO AUTOMATION/01_SCRIPTS/job_$JOB_ID/video_plan.json" >> "$GITHUB_ENV"
+          echo "RENDER_DEST=gdrive:AI VIDEO AUTOMATION/03_RENDERED" >> "$GITHUB_ENV"
 
-      - name: List downloaded files
-        run: |
-          find ./input -type f -maxdepth 3 -ls
+          mkdir -p input work/normalized output
 
-      - name: Generate test video if no input exists
+          echo "JOB_ID=$JOB_ID"
+          echo "CLIP_SOURCE=gdrive:AI VIDEO AUTOMATION/02_AI_ASSETS/VIDEO_CLIPS/job_$JOB_ID"
+          echo "PLAN_SOURCE=gdrive:AI VIDEO AUTOMATION/01_SCRIPTS/job_$JOB_ID/video_plan.json"
+
+      - name: Download four Pixazo clips
         run: |
-          if [ -z "$(find ./input -type f -print -quit)" ]; then
-            echo "No video found in Drive. Creating test video."
-            ffmpeg \
-              -f lavfi \
-              -i testsrc=duration=10:size=1280x720:rate=30 \
-              -f lavfi \
-              -i sine=frequency=1000:duration=10 \
+          set -e
+
+          rclone copy "$CLIP_SOURCE" ./input \
+            --include "scene_01.mp4" \
+            --include "scene_02.mp4" \
+            --include "scene_03.mp4" \
+            --include "scene_04.mp4" \
+            --progress
+
+          ls -lh input
+
+      - name: Download Gemini video plan
+        run: |
+          set -e
+
+          rclone copyto \
+            "$PLAN_SOURCE" \
+            "./work/video_plan.json" \
+            --progress
+
+          test -s work/video_plan.json
+
+          echo "Video plan downloaded."
+          jq -r '.title' work/video_plan.json
+          echo "Voiceover characters:"
+          jq -r '.voiceover | length' work/video_plan.json
+
+      - name: Verify inputs
+        run: |
+          set -e
+
+          test -f input/scene_01.mp4
+          test -f input/scene_02.mp4
+          test -f input/scene_03.mp4
+          test -f input/scene_04.mp4
+          test -s work/video_plan.json
+
+          echo "ALL INPUTS FOUND"
+
+      - name: Inspect original clips
+        run: |
+          set -e
+
+          for FILE in input/scene_01.mp4 input/scene_02.mp4 input/scene_03.mp4 input/scene_04.mp4
+          do
+            echo "========================================"
+            echo "$FILE"
+            echo "========================================"
+            ffprobe -v error \
+              -show_entries format=duration,size \
+              -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
+              -of default=noprint_wrappers=1 \
+              "$FILE"
+          done
+
+      - name: Normalize clips to 720x1280 24fps 4sec
+        run: |
+          set -e
+
+          for NUMBER in 01 02 03 04
+          do
+            INPUT="input/scene_${NUMBER}.mp4"
+            OUTPUT="work/normalized/scene_${NUMBER}.mp4"
+
+            ffmpeg -y \
+              -i "$INPUT" \
+              -t 4 \
+              -vf "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=24,setsar=1" \
+              -an \
               -c:v libx264 \
+              -preset veryfast \
+              -crf 23 \
               -pix_fmt yuv420p \
-              -c:a aac \
-              -shortest \
-              ./input/input.mp4
-          fi
+              -movflags +faststart \
+              "$OUTPUT"
+          done
 
-      - name: Process video with FFmpeg
+          ls -lh work/normalized
+
+      - name: Verify normalized clips
         run: |
-          INPUT=$(find ./input -type f \( -name "*.mp4" -o -name "*.mov" -o -name "*.mkv" \) | head -n 1)
+          set -e
 
-          if [ -z "$INPUT" ]; then
-            echo "ERROR: No video file found."
-            exit 1
-          fi
+          for FILE in work/normalized/*.mp4
+          do
+            echo "========================================"
+            echo "$FILE"
+            echo "========================================"
+            ffprobe -v error \
+              -show_entries format=duration,size \
+              -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
+              -of default=noprint_wrappers=1 \
+              "$FILE"
+          done
 
-          echo "Processing: $INPUT"
+      - name: Create concat list
+        run: |
+          set -e
 
-          ffmpeg \
-            -y \
-            -i "$INPUT" \
-            -vf "drawtext=text='My AI Video':fontsize=40:x=(w-text_w)/2:y=40" \
+          cat > work/concat.txt <<'EOF'
+          file 'normalized/scene_01.mp4'
+          file 'normalized/scene_02.mp4'
+          file 'normalized/scene_03.mp4'
+          file 'normalized/scene_04.mp4'
+          EOF
+
+          cat work/concat.txt
+
+      - name: Merge four scenes into 16 second visual sequence
+        run: |
+          set -e
+
+          ffmpeg -y \
+            -f concat \
+            -safe 0 \
+            -i work/concat.txt \
+            -an \
             -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
             -pix_fmt yuv420p \
-            -c:a aac \
-            output.mp4
+            -movflags +faststart \
+            work/merged_16sec.mp4
 
-      - name: Check output
-        run: |
-          ls -lh output.mp4
           ffprobe -v error \
             -show_entries format=duration,size \
-            -show_entries stream=codec_name,width,height \
+            -show_entries stream=width,height,r_frame_rate \
             -of default=noprint_wrappers=1 \
-            output.mp4
+            work/merged_16sec.mp4
 
-      - name: Upload processed video to Google Drive
+      - name: Create exactly 60 second silent video
         run: |
-          mkdir -p "upload"
-          cp output.mp4 "upload/final-video.mp4"
-          rclone copy "upload" "gdrive:AI VIDEO AUTOMATION/OUTPUT" --progress
+          set -e
+
+          ffmpeg -y \
+            -stream_loop -1 \
+            -i work/merged_16sec.mp4 \
+            -t 60 \
+            -an \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -pix_fmt yuv420p \
+            -movflags +faststart \
+            work/video_60sec_silent.mp4
+
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=width,height,r_frame_rate \
+            -of default=noprint_wrappers=1 \
+            work/video_60sec_silent.mp4
+
+      - name: Install free TTS engine
+        run: |
+          set -e
+
+          python3 -m venv work/tts-venv
+          work/tts-venv/bin/pip install --disable-pip-version-check --no-cache-dir edge-tts
+          work/tts-venv/bin/edge-tts --version
+
+      - name: Generate voiceover and subtitles
+        run: |
+          set -e
+
+          jq -r '.voiceover' work/video_plan.json > work/voiceover.txt
+          jq -r '.title' work/video_plan.json | cut -c1-70 > work/title.txt
+
+          test -s work/voiceover.txt
+          test -s work/title.txt
+
+          echo "Voiceover text:"
+          cat work/voiceover.txt
+          echo ""
+          echo "Title:"
+          cat work/title.txt
+
+          work/tts-venv/bin/edge-tts \
+            --file work/voiceover.txt \
+            --voice en-US-GuyNeural \
+            --write-media work/voice.mp3 \
+            --write-subtitles work/voice.srt
+
+          test -s work/voice.mp3
+          test -s work/voice.srt
+
+          echo "Voiceover generated."
+          ls -lh work/voice.mp3 work/voice.srt
+
+      - name: Inspect voiceover duration
+        run: |
+          set -e
+
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 \
+            work/voice.mp3
+
+      - name: Render final 60 second video with voice and text
+        run: |
+          set -e
+
+          ffmpeg -y \
+            -i work/video_60sec_silent.mp4 \
+            -i work/voice.mp3 \
+            -filter_complex "[0:v]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=work/title.txt:fontcolor=white:fontsize=42:box=1:boxcolor=black@0.45:boxborderw=18:x=(w-text_w)/2:y=55,subtitles=work/voice.srt:force_style='FontName=DejaVu Sans,FontSize=18,Alignment=2,MarginV=150,Outline=2'[v];[1:a]apad,atrim=duration=60[a]" \
+            -map "[v]" \
+            -map "[a]" \
+            -t 60 \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            -b:a 128k \
+            -movflags +faststart \
+            "output/job_${JOB_ID}_final.mp4"
+
+      - name: Verify final video
+        run: |
+          set -e
+
+          FINAL="output/job_${JOB_ID}_final.mp4"
+
+          test -s "$FINAL"
+
+          echo "========================================"
+          echo "FINAL VIDEO"
+          echo "========================================"
+
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
+            -of default=noprint_wrappers=1 \
+            "$FINAL"
+
+          ls -lh "$FINAL"
+
+      - name: Upload final video to Google Drive
+        run: |
+          set -e
+
+          FINAL="output/job_${JOB_ID}_final.mp4"
+
+          rclone copy \
+            "$FINAL" \
+            "$RENDER_DEST" \
+            --progress
+
+          echo "========================================"
+          echo "FINAL VIDEO UPLOADED TO DRIVE"
+          echo "========================================"
+
+          rclone lsf "$RENDER_DEST" \
+            --include "job_${JOB_ID}_final.mp4"
 
       - name: Upload GitHub artifact
         uses: actions/upload-artifact@v4
         with:
-          name: processed-video
-          path: output.mp4
+          name: ai-video-${{ inputs.job_id }}
+          path: output/job_${{ inputs.job_id }}_final.mp4
+          retention-days: 7
