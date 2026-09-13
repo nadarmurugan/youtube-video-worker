@@ -13,13 +13,9 @@ permissions:
   contents: read
 
 jobs:
-
   process-video:
-
     name: Render AI Video
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     env:
@@ -28,7 +24,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. CHECKOUT REPOSITORY
+      # 1. CHECKOUT
       # ============================================================
 
       - name: Checkout repository
@@ -36,13 +32,10 @@ jobs:
 
 
       # ============================================================
-      # 2. INSTALL REQUIRED TOOLS
-      #
-      # rclone is intentionally pinned to v1.75.1 to match the
-      # working Windows rclone setup.
+      # 2. INSTALL TOOLS
       # ============================================================
 
-      - name: Install FFmpeg, jq, Python and rclone v1.75.1
+      - name: Install FFmpeg jq Python and rclone
         shell: bash
         run: |
           set -euo pipefail
@@ -70,7 +63,6 @@ jobs:
             -o /tmp/rclone.zip
 
           rm -rf /tmp/rclone
-
           mkdir -p /tmp/rclone
 
           unzip -q \
@@ -91,7 +83,7 @@ jobs:
       # 3. VERIFY TOOLS
       # ============================================================
 
-      - name: Verify installed tools
+      - name: Verify tools
         shell: bash
         run: |
           set -euo pipefail
@@ -121,20 +113,11 @@ jobs:
           python3 --version
 
           echo ""
-          echo "All required tools are available."
+          echo "All tools are available."
 
 
       # ============================================================
       # 4. CONFIGURE RCLONE
-      #
-      # GitHub Secret required:
-      #
-      # RCLONE_CONFIG_B64
-      #
-      # This is the Base64 encoded rclone.conf from Windows.
-      #
-      # IMPORTANT:
-      # Never print the secret itself.
       # ============================================================
 
       - name: Configure rclone
@@ -157,18 +140,14 @@ jobs:
 
           echo "Decoding rclone configuration..."
 
-          printf '%s' "$RCLONE_CONFIG_B64" \
-            | base64 --decode \
-            > "$RCLONE_FILE"
+          printf '%s' "$RCLONE_CONFIG_B64" | base64 --decode > "$RCLONE_FILE"
 
           chmod 600 "$RCLONE_FILE"
 
           if [ ! -s "$RCLONE_FILE" ]; then
-            echo "ERROR: rclone configuration file is empty."
+            echo "ERROR: rclone configuration is empty."
             exit 1
           fi
-
-          echo "rclone configuration created."
 
           echo ""
           echo "Configured remotes:"
@@ -182,7 +161,7 @@ jobs:
       # 5. TEST GOOGLE DRIVE
       # ============================================================
 
-      - name: Test Google Drive connection
+      - name: Test Google Drive
         shell: bash
         run: |
           set -euo pipefail
@@ -252,7 +231,6 @@ jobs:
           echo ""
           echo "JOB CONFIGURATION"
           echo "----------------------------------------"
-
           echo "JOB_ID      : $INPUT_JOB_ID"
           echo "JOB_FOLDER  : $JOB_FOLDER"
           echo "CLIP_SOURCE : $CLIP_SOURCE"
@@ -261,16 +239,16 @@ jobs:
 
 
       # ============================================================
-      # 7. CHECK PIXAZO CLIP FOLDER
+      # 7. CHECK PIXAZO FOLDER
       # ============================================================
 
-      - name: Check Pixazo clip folder
+      - name: Check Pixazo folder
         shell: bash
         run: |
           set -euo pipefail
 
           echo "========================================"
-          echo "CHECKING PIXAZO CLIPS"
+          echo "CHECKING PIXAZO CLIP FOLDER"
           echo "========================================"
 
           rclone \
@@ -282,7 +260,7 @@ jobs:
 
 
       # ============================================================
-      # 8. DOWNLOAD FOUR PIXAZO SCENES
+      # 8. DOWNLOAD FOUR SCENES
       # ============================================================
 
       - name: Download Pixazo scenes
@@ -296,7 +274,7 @@ jobs:
 
           rclone \
             --config "$RCLONE_FILE" \
-            copy "$CLIP_SOURCE" ./input \
+            copy "$CLIP_SOURCE" input \
             --include "scene_01.mp4" \
             --include "scene_02.mp4" \
             --include "scene_03.mp4" \
@@ -305,13 +283,11 @@ jobs:
 
           echo ""
           echo "Downloaded files:"
-          echo "----------------------------------------"
-
           ls -lh input
 
 
       # ============================================================
-      # 9. VERIFY FOUR SCENES
+      # 9. VERIFY SCENES
       # ============================================================
 
       - name: Verify Pixazo scenes
@@ -329,7 +305,6 @@ jobs:
             input/scene_03.mp4 \
             input/scene_04.mp4
           do
-
             if [ ! -s "$FILE" ]; then
               echo "ERROR: Missing input:"
               echo "$FILE"
@@ -337,15 +312,14 @@ jobs:
             fi
 
             echo "OK: $FILE"
-
           done
 
           echo ""
-          echo "All four Pixazo scenes are available."
+          echo "All four scenes are available."
 
 
       # ============================================================
-      # 10. INSPECT ORIGINAL PIXAZO CLIPS
+      # 10. INSPECT ORIGINAL CLIPS
       # ============================================================
 
       - name: Inspect Pixazo clips
@@ -363,7 +337,6 @@ jobs:
             input/scene_03.mp4 \
             input/scene_04.mp4
           do
-
             echo ""
             echo "----------------------------------------"
             echo "$FILE"
@@ -375,32 +348,25 @@ jobs:
               -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
               -of default=noprint_wrappers=1 \
               "$FILE"
-
           done
 
 
       # ============================================================
-      # 11. PREPARE VIDEO PLAN
-      #
-      # If video_plan.json exists, use it.
-      #
-      # If it does not exist, use a temporary test title and
-      # voiceover so PIXAZO_4_SCENE_TEST can still be processed.
+      # 11. PREPARE TITLE AND VOICEOVER
       # ============================================================
 
-      - name: Prepare video plan
+      - name: Prepare title and voiceover
         shell: bash
         run: |
           set -euo pipefail
 
           echo "========================================"
-          echo "CHECKING VIDEO PLAN"
+          echo "PREPARING TITLE AND VOICEOVER"
           echo "========================================"
 
           if rclone \
             --config "$RCLONE_FILE" \
-            lsf "$PLAN_SOURCE" \
-            >/dev/null 2>&1
+            lsf "$PLAN_SOURCE" >/dev/null 2>&1
           then
 
             echo "video_plan.json found."
@@ -412,9 +378,6 @@ jobs:
               "work/video_plan.json"
 
             test -s "work/video_plan.json"
-
-            echo ""
-            echo "Video plan downloaded."
 
             jq -r '.title // "AI Video"' \
               work/video_plan.json \
@@ -428,46 +391,43 @@ jobs:
           else
 
             echo "video_plan.json not found."
+            echo "Using test title and test voiceover."
 
-            echo ""
-            echo "Using TEST title and TEST voiceover."
+            printf '%s\n' \
+              'AI Video Automation Test' \
+              > work/title.txt
 
-            cat > work/title.txt <<'EOF'
-AI Video Automation Test
-EOF
+            printf '%s\n' \
+              'Welcome to this AI video automation test. These scenes were generated using Pixazo and are now being processed automatically with FFmpeg inside GitHub Actions. The video worker downloads the AI generated scenes from Google Drive, combines them, creates the voiceover and subtitles, and produces the final vertical video.' \
+              > work/voiceover.txt
+          fi
 
-            cat > work/voiceover.txt <<'EOF'
-Welcome to this AI video automation test. These scenes were generated using Pixazo and are now being processed automatically with FFmpeg inside GitHub Actions. The video worker downloads the AI generated scenes from Google Drive, combines them, creates the voiceover and subtitles, and produces the final vertical video.
-EOF
+          if [ ! -s "work/title.txt" ]; then
+            echo "ERROR: Title is empty."
+            exit 1
+          fi
 
+          if [ ! -s "work/voiceover.txt" ]; then
+            echo "ERROR: Voiceover text is empty."
+            exit 1
           fi
 
           echo ""
           echo "TITLE"
           echo "----------------------------------------"
-
           cat work/title.txt
 
           echo ""
           echo "VOICEOVER"
           echo "----------------------------------------"
-
           cat work/voiceover.txt
 
 
       # ============================================================
-      # 12. NORMALIZE FOUR PIXAZO SCENES
-      #
-      # Target:
-      #
-      # 720 x 1280
-      # 24 FPS
-      # 4 seconds each
-      # H.264
-      # No audio
+      # 12. NORMALIZE FOUR SCENES
       # ============================================================
 
-      - name: Normalize four scenes
+      - name: Normalize Pixazo scenes
         shell: bash
         run: |
           set -euo pipefail
@@ -478,14 +438,11 @@ EOF
 
           for NUMBER in 01 02 03 04
           do
-
             INPUT="input/scene_${NUMBER}.mp4"
-
             OUTPUT="work/normalized/scene_${NUMBER}.mp4"
 
             echo ""
-            echo "Processing:"
-            echo "$INPUT"
+            echo "Processing $INPUT"
 
             ffmpeg \
               -y \
@@ -499,7 +456,6 @@ EOF
               -pix_fmt yuv420p \
               -movflags +faststart \
               "$OUTPUT"
-
           done
 
           echo ""
@@ -526,7 +482,6 @@ EOF
             work/normalized/scene_03.mp4 \
             work/normalized/scene_04.mp4
           do
-
             if [ ! -s "$FILE" ]; then
               echo "ERROR: Missing normalized clip:"
               echo "$FILE"
@@ -542,7 +497,6 @@ EOF
               -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
               -of default=noprint_wrappers=1 \
               "$FILE"
-
           done
 
 
@@ -559,25 +513,22 @@ EOF
           echo "CREATING CONCAT LIST"
           echo "========================================"
 
-          cat > work/concat.txt <<'EOF'
-file 'normalized/scene_01.mp4'
-file 'normalized/scene_02.mp4'
-file 'normalized/scene_03.mp4'
-file 'normalized/scene_04.mp4'
-EOF
+          printf '%s\n' \
+            "file 'normalized/scene_01.mp4'" \
+            "file 'normalized/scene_02.mp4'" \
+            "file 'normalized/scene_03.mp4'" \
+            "file 'normalized/scene_04.mp4'" \
+            > work/concat.txt
 
           echo ""
-
           cat work/concat.txt
 
 
       # ============================================================
       # 15. MERGE FOUR SCENES
-      #
-      # 4 scenes x 4 seconds = approximately 16 seconds
       # ============================================================
 
-      - name: Merge four scenes
+      - name: Merge four Pixazo scenes
         shell: bash
         run: |
           set -euo pipefail
@@ -612,23 +563,9 @@ EOF
             -of default=noprint_wrappers=1 \
             work/merged_16sec.mp4
 
-          echo ""
-          echo "16-second sequence created."
-
 
       # ============================================================
       # 16. CREATE 60 SECOND SILENT VIDEO
-      #
-      # Current test:
-      #
-      # 16-second sequence
-      #       ↓
-      # loop
-      #       ↓
-      # 60-second video
-      #
-      # Later production version will use more AI scenes instead
-      # of repeating the same 16 seconds.
       # ============================================================
 
       - name: Create 60 second silent video
@@ -637,7 +574,7 @@ EOF
           set -euo pipefail
 
           echo "========================================"
-          echo "CREATING 60 SECOND VIDEO"
+          echo "CREATING 60 SECOND SILENT VIDEO"
           echo "========================================"
 
           ffmpeg \
@@ -668,20 +605,16 @@ EOF
 
 
       # ============================================================
-      # 17. INSTALL TTS ENGINE
-      #
-      # Temporary environment only.
-      # No Google Cloud OAuth.
-      # No Google Cloud Console.
+      # 17. INSTALL EDGE TTS
       # ============================================================
 
-      - name: Install free TTS engine
+      - name: Install Edge TTS
         shell: bash
         run: |
           set -euo pipefail
 
           echo "========================================"
-          echo "INSTALLING TTS ENGINE"
+          echo "INSTALLING EDGE TTS"
           echo "========================================"
 
           python3 \
@@ -697,14 +630,12 @@ EOF
           echo ""
           echo "Edge TTS installed."
 
-          work/tts-venv/bin/edge-tts --version
-
 
       # ============================================================
-      # 18. GENERATE VOICEOVER + SUBTITLES
+      # 18. GENERATE VOICEOVER
       # ============================================================
 
-      - name: Generate voiceover and subtitles
+      - name: Generate voiceover
         shell: bash
         run: |
           set -euo pipefail
@@ -712,31 +643,6 @@ EOF
           echo "========================================"
           echo "GENERATING VOICEOVER"
           echo "========================================"
-
-          if [ ! -s "work/voiceover.txt" ]; then
-            echo "ERROR: Voiceover text is empty."
-            exit 1
-          fi
-
-          if [ ! -s "work/title.txt" ]; then
-            echo "ERROR: Title is empty."
-            exit 1
-          fi
-
-          echo ""
-          echo "VOICEOVER TEXT"
-          echo "----------------------------------------"
-
-          cat work/voiceover.txt
-
-          echo ""
-          echo "TITLE"
-          echo "----------------------------------------"
-
-          cat work/title.txt
-
-          echo ""
-          echo "Generating TTS..."
 
           work/tts-venv/bin/edge-tts \
             --file work/voiceover.txt \
@@ -778,13 +684,12 @@ EOF
       # ============================================================
       # 20. RENDER FINAL VIDEO
       #
-      # Includes:
-      #
-      # - 60 second video
-      # - title
-      # - subtitles
-      # - voiceover
-      # - AAC audio
+      # 60 seconds
+      # Vertical 720x1280
+      # Title
+      # Subtitles
+      # Voiceover
+      # AAC audio
       # ============================================================
 
       - name: Render final video
@@ -802,24 +707,11 @@ EOF
             -y \
             -i work/video_60sec_silent.mp4 \
             -i work/voice.mp3 \
-            -filter_complex "\
-          [0:v]drawtext=\
-          fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:\
-          textfile=work/title.txt:\
-          fontcolor=white:\
-          fontsize=42:\
-          box=1:\
-          boxcolor=black@0.45:\
-          boxborderw=18:\
-          x=(w-text_w)/2:\
-          y=55,\
-          subtitles=work/voice.srt:\
-          force_style='FontName=DejaVu Sans,FontSize=18,Alignment=2,MarginV=150,Outline=2'\
-          [v];\
-          [1:a]apad,atrim=duration=60[a]" \
-            -map "[v]" \
-            -map "[a]" \
+            -vf "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=work/title.txt:fontcolor=white:fontsize=42:box=1:boxcolor=black@0.45:boxborderw=18:x=(w-text_w)/2:y=55,subtitles=work/voice.srt:force_style='FontName=DejaVu Sans,FontSize=18,Alignment=2,MarginV=150,Outline=2'" \
+            -map 0:v:0 \
+            -map 1:a:0 \
             -t 60 \
+            -af "apad,atrim=duration=60" \
             -c:v libx264 \
             -preset veryfast \
             -crf 23 \
@@ -871,7 +763,7 @@ EOF
 
 
       # ============================================================
-      # 22. UPLOAD FINAL VIDEO TO GOOGLE DRIVE
+      # 22. UPLOAD TO GOOGLE DRIVE
       # ============================================================
 
       - name: Upload final video to Google Drive
@@ -906,10 +798,10 @@ EOF
 
 
       # ============================================================
-      # 23. UPLOAD GITHUB ARTIFACT
+      # 23. GITHUB ARTIFACT
       # ============================================================
 
-      - name: Upload final video as GitHub artifact
+      - name: Upload final video artifact
         uses: actions/upload-artifact@v4
         with:
           name: ai-video-${{ inputs.job_id }}
@@ -919,7 +811,7 @@ EOF
 
 
       # ============================================================
-      # 24. PIPELINE COMPLETE
+      # 24. COMPLETE
       # ============================================================
 
       - name: Pipeline complete
