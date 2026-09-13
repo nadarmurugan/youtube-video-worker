@@ -9,39 +9,76 @@ jobs:
 
     steps:
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg and rclone
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          curl https://rclone.org/install.sh | sudo bash
 
-      - name: Check FFmpeg
+      - name: Check tools
         run: |
           ffmpeg -version
+          rclone version
 
-      - name: Generate test video
+      - name: Configure rclone
+        env:
+          RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
         run: |
+          mkdir -p ~/.config/rclone
+          echo "$RCLONE_CONFIG_B64" | base64 --decode > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+
+      - name: Test Google Drive
+        run: |
+          rclone lsd gdrive:
+
+      - name: Download test input from Google Drive
+        run: |
+          mkdir -p input
+          rclone copy "gdrive:AI VIDEO AUTOMATION" ./input --progress
+
+      - name: List downloaded files
+        run: |
+          find ./input -type f -maxdepth 3 -ls
+
+      - name: Generate test video if no input exists
+        run: |
+          if [ -z "$(find ./input -type f -print -quit)" ]; then
+            echo "No video found in Drive. Creating test video."
+            ffmpeg \
+              -f lavfi \
+              -i testsrc=duration=10:size=1280x720:rate=30 \
+              -f lavfi \
+              -i sine=frequency=1000:duration=10 \
+              -c:v libx264 \
+              -pix_fmt yuv420p \
+              -c:a aac \
+              -shortest \
+              ./input/input.mp4
+          fi
+
+      - name: Process video with FFmpeg
+        run: |
+          INPUT=$(find ./input -type f \( -name "*.mp4" -o -name "*.mov" -o -name "*.mkv" \) | head -n 1)
+
+          if [ -z "$INPUT" ]; then
+            echo "ERROR: No video file found."
+            exit 1
+          fi
+
+          echo "Processing: $INPUT"
+
           ffmpeg \
-            -f lavfi \
-            -i testsrc=duration=10:size=1280x720:rate=30 \
-            -f lavfi \
-            -i sine=frequency=1000:duration=10 \
+            -y \
+            -i "$INPUT" \
+            -vf "drawtext=text='My AI Video':fontsize=40:x=(w-text_w)/2:y=40" \
             -c:v libx264 \
             -pix_fmt yuv420p \
             -c:a aac \
-            -shortest \
-            input.mp4
-
-      - name: Add text to video
-        run: |
-          ffmpeg \
-            -i input.mp4 \
-            -vf "drawtext=text='My AI Video':fontsize=40:x=(w-text_w)/2:y=40" \
-            -c:a copy \
             output.mp4
 
       - name: Check output
         run: |
-          ls -lh input.mp4
           ls -lh output.mp4
           ffprobe -v error \
             -show_entries format=duration,size \
@@ -49,7 +86,13 @@ jobs:
             -of default=noprint_wrappers=1 \
             output.mp4
 
-      - name: Upload processed video
+      - name: Upload processed video to Google Drive
+        run: |
+          mkdir -p "upload"
+          cp output.mp4 "upload/final-video.mp4"
+          rclone copy "upload" "gdrive:AI VIDEO AUTOMATION/OUTPUT" --progress
+
+      - name: Upload GitHub artifact
         uses: actions/upload-artifact@v4
         with:
           name: processed-video
