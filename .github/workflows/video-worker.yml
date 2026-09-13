@@ -4,132 +4,334 @@ on:
   workflow_dispatch:
     inputs:
       job_id:
-        description: 'Video job ID from Apps Script / Supabase'
+        description: "Video job ID from Apps Script / Supabase"
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   process-video:
+    name: Render AI Video
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      RCLONE_FILE: ${{ github.workspace }}/.rclone/rclone.conf
 
     steps:
-      - name: Install FFmpeg and rclone
+
+      # ============================================================
+      # 1. INSTALL REQUIRED TOOLS
+      # ============================================================
+      - name: Install FFmpeg, jq, Python and rclone
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           sudo apt-get update
-          sudo apt-get install -y ffmpeg jq python3-venv
+
+          sudo apt-get install -y \
+            ffmpeg \
+            jq \
+            python3 \
+            python3-venv \
+            curl \
+            ca-certificates
+
           curl https://rclone.org/install.sh | sudo bash
 
-      - name: Check tools
+      # ============================================================
+      # 2. VERIFY TOOLS
+      # ============================================================
+      - name: Verify installed tools
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "========================================"
+          echo "TOOL VERSIONS"
+          echo "========================================"
+
           ffmpeg -version | head -n 1
           ffprobe -version | head -n 1
           rclone version | head -n 3
           jq --version
           python3 --version
 
+      # ============================================================
+      # 3. CONFIGURE RCLONE
+      #
+      # IMPORTANT:
+      # GitHub Secret:
+      #   RCLONE_CONFIG
+      #
+      # Must contain RAW rclone.conf contents.
+      # Do NOT Base64 encode it.
+      # ============================================================
       - name: Configure rclone
+        shell: bash
         env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+          RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
         run: |
-          set -e
-          mkdir -p "$HOME/.config/rclone"
-          printf '%s\n' "$RCLONE_CONFIG" > "$HOME/.config/rclone/rclone.conf"
-          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          set -euo pipefail
+
+          echo "Creating rclone configuration..."
+
+          mkdir -p "$(dirname "$RCLONE_FILE")"
+
+          printf '%s\n' "$RCLONE_CONFIG_CONTENT" > "$RCLONE_FILE"
+
+          chmod 600 "$RCLONE_FILE"
+
+          if [ ! -s "$RCLONE_FILE" ]; then
+            echo "ERROR: rclone configuration file is empty."
+            exit 1
+          fi
+
+          echo "rclone config file created."
+
           echo "Configured remotes:"
-          rclone listremotes
+          rclone --config "$RCLONE_FILE" listremotes
 
-      - name: Test Google Drive
+      # ============================================================
+      # 4. TEST GOOGLE DRIVE
+      # ============================================================
+      - name: Test Google Drive connection
+        shell: bash
         run: |
-          set -e
-          rclone lsd gdrive:
-          rclone lsd "gdrive:AI VIDEO AUTOMATION"
+          set -euo pipefail
 
-      - name: Prepare job variables
+          echo "========================================"
+          echo "TESTING GOOGLE DRIVE"
+          echo "========================================"
+
+          rclone --config "$RCLONE_FILE" lsd gdrive:
+
+          echo ""
+          echo "Checking AI VIDEO AUTOMATION..."
+
+          rclone \
+            --config "$RCLONE_FILE" \
+            lsd "gdrive:AI VIDEO AUTOMATION"
+
+          echo ""
+          echo "Google Drive connection successful."
+
+      # ============================================================
+      # 5. PREPARE JOB VARIABLES
+      # ============================================================
+      - name: Prepare job
+        shell: bash
         env:
-          JOB_ID: ${{ inputs.job_id }}
+          INPUT_JOB_ID: ${{ inputs.job_id }}
         run: |
-          set -e
-          echo "JOB_ID=$JOB_ID" >> "$GITHUB_ENV"
-          echo "JOB_FOLDER=job_$JOB_ID" >> "$GITHUB_ENV"
-          echo "CLIP_SOURCE=gdrive:AI VIDEO AUTOMATION/02_AI_ASSETS/VIDEO_CLIPS/job_$JOB_ID" >> "$GITHUB_ENV"
-          echo "PLAN_SOURCE=gdrive:AI VIDEO AUTOMATION/01_SCRIPTS/job_$JOB_ID/video_plan.json" >> "$GITHUB_ENV"
-          echo "RENDER_DEST=gdrive:AI VIDEO AUTOMATION/03_RENDERED" >> "$GITHUB_ENV"
+          set -euo pipefail
 
-          mkdir -p input work/normalized output
+          if [ -z "$INPUT_JOB_ID" ]; then
+            echo "ERROR: job_id is empty."
+            exit 1
+          fi
 
-          echo "JOB_ID=$JOB_ID"
-          echo "CLIP_SOURCE=gdrive:AI VIDEO AUTOMATION/02_AI_ASSETS/VIDEO_CLIPS/job_$JOB_ID"
-          echo "PLAN_SOURCE=gdrive:AI VIDEO AUTOMATION/01_SCRIPTS/job_$JOB_ID/video_plan.json"
+          JOB_FOLDER="job_${INPUT_JOB_ID}"
 
-      - name: Download four Pixazo clips
+          CLIP_SOURCE="gdrive:AI VIDEO AUTOMATION/02_AI_ASSETS/VIDEO_CLIPS/${JOB_FOLDER}"
+
+          PLAN_SOURCE="gdrive:AI VIDEO AUTOMATION/01_SCRIPTS/${JOB_FOLDER}/video_plan.json"
+
+          RENDER_DEST="gdrive:AI VIDEO AUTOMATION/03_RENDERED"
+
+          echo "JOB_ID=$INPUT_JOB_ID" >> "$GITHUB_ENV"
+          echo "JOB_FOLDER=$JOB_FOLDER" >> "$GITHUB_ENV"
+          echo "CLIP_SOURCE=$CLIP_SOURCE" >> "$GITHUB_ENV"
+          echo "PLAN_SOURCE=$PLAN_SOURCE" >> "$GITHUB_ENV"
+          echo "RENDER_DEST=$RENDER_DEST" >> "$GITHUB_ENV"
+
+          mkdir -p \
+            input \
+            work \
+            work/normalized \
+            output
+
+          echo "========================================"
+          echo "JOB CONFIGURATION"
+          echo "========================================"
+          echo "JOB_ID       : $INPUT_JOB_ID"
+          echo "JOB_FOLDER   : $JOB_FOLDER"
+          echo "CLIP_SOURCE  : $CLIP_SOURCE"
+          echo "PLAN_SOURCE  : $PLAN_SOURCE"
+          echo "RENDER_DEST  : $RENDER_DEST"
+
+      # ============================================================
+      # 6. CHECK SOURCE FOLDER
+      # ============================================================
+      - name: Check Pixazo clip folder
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          rclone copy "$CLIP_SOURCE" ./input \
+          echo "========================================"
+          echo "CHECKING PIXAZO CLIPS"
+          echo "========================================"
+
+          rclone \
+            --config "$RCLONE_FILE" \
+            lsf "$CLIP_SOURCE"
+
+      # ============================================================
+      # 7. DOWNLOAD FOUR PIXAZO CLIPS
+      # ============================================================
+      - name: Download Pixazo scenes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Downloading scenes..."
+
+          rclone \
+            --config "$RCLONE_FILE" \
+            copy "$CLIP_SOURCE" ./input \
             --include "scene_01.mp4" \
             --include "scene_02.mp4" \
             --include "scene_03.mp4" \
             --include "scene_04.mp4" \
             --progress
 
+          echo ""
+          echo "Downloaded files:"
           ls -lh input
 
-      - name: Download Gemini video plan
+      # ============================================================
+      # 8. DOWNLOAD GEMINI VIDEO PLAN
+      # ============================================================
+      - name: Download video plan
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          rclone copyto \
+          echo "Downloading video_plan.json..."
+
+          rclone \
+            --config "$RCLONE_FILE" \
+            copyto \
             "$PLAN_SOURCE" \
-            "./work/video_plan.json" \
+            "work/video_plan.json" \
             --progress
 
-          test -s work/video_plan.json
+          test -s "work/video_plan.json"
 
+          echo ""
           echo "Video plan downloaded."
-          jq -r '.title' work/video_plan.json
-          echo "Voiceover characters:"
-          jq -r '.voiceover | length' work/video_plan.json
 
-      - name: Verify inputs
+          echo "========================================"
+          echo "VIDEO TITLE"
+          echo "========================================"
+
+          jq -r '.title // empty' work/video_plan.json
+
+          echo ""
+          echo "========================================"
+          echo "VOICEOVER LENGTH"
+          echo "========================================"
+
+          jq -r '.voiceover // empty | length' work/video_plan.json
+
+      # ============================================================
+      # 9. VERIFY INPUTS
+      # ============================================================
+      - name: Verify downloaded inputs
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          test -f input/scene_01.mp4
-          test -f input/scene_02.mp4
-          test -f input/scene_03.mp4
-          test -f input/scene_04.mp4
-          test -s work/video_plan.json
+          echo "========================================"
+          echo "VERIFYING INPUTS"
+          echo "========================================"
 
-          echo "ALL INPUTS FOUND"
-
-      - name: Inspect original clips
-        run: |
-          set -e
-
-          for FILE in input/scene_01.mp4 input/scene_02.mp4 input/scene_03.mp4 input/scene_04.mp4
+          for FILE in \
+            input/scene_01.mp4 \
+            input/scene_02.mp4 \
+            input/scene_03.mp4 \
+            input/scene_04.mp4
           do
+            if [ ! -s "$FILE" ]; then
+              echo "ERROR: Missing input: $FILE"
+              exit 1
+            fi
+
+            echo "OK: $FILE"
+          done
+
+          if [ ! -s "work/video_plan.json" ]; then
+            echo "ERROR: video_plan.json missing."
+            exit 1
+          fi
+
+          echo ""
+          echo "ALL INPUTS FOUND."
+
+      # ============================================================
+      # 10. INSPECT ORIGINAL CLIPS
+      # ============================================================
+      - name: Inspect Pixazo clips
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for FILE in \
+            input/scene_01.mp4 \
+            input/scene_02.mp4 \
+            input/scene_03.mp4 \
+            input/scene_04.mp4
+          do
+
+            echo ""
             echo "========================================"
             echo "$FILE"
             echo "========================================"
-            ffprobe -v error \
-              -show_entries format=duration,size \
-              -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
+
+            ffprobe \
+              -v error \
+              -show_entries \
+              format=duration,size \
+              -show_entries \
+              stream=codec_name,width,height,r_frame_rate,pix_fmt \
               -of default=noprint_wrappers=1 \
               "$FILE"
+
           done
 
-      - name: Normalize clips to 720x1280 24fps 4sec
+      # ============================================================
+      # 11. NORMALIZE SCENES
+      #
+      # Pixazo:
+      # 720x1280
+      # 24 FPS
+      # 97 frames ~= 4 seconds
+      #
+      # We force every clip to exactly 4 seconds.
+      # ============================================================
+      - name: Normalize four scenes
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "========================================"
+          echo "NORMALIZING SCENES"
+          echo "========================================"
 
           for NUMBER in 01 02 03 04
           do
+
             INPUT="input/scene_${NUMBER}.mp4"
             OUTPUT="work/normalized/scene_${NUMBER}.mp4"
 
-            ffmpeg -y \
+            echo ""
+            echo "Processing $INPUT"
+
+            ffmpeg \
+              -y \
               -i "$INPUT" \
               -t 4 \
               -vf "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=24,setsar=1" \
@@ -140,29 +342,47 @@ jobs:
               -pix_fmt yuv420p \
               -movflags +faststart \
               "$OUTPUT"
+
           done
 
+          echo ""
+          echo "Normalized clips:"
           ls -lh work/normalized
 
+      # ============================================================
+      # 12. VERIFY NORMALIZED CLIPS
+      # ============================================================
       - name: Verify normalized clips
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           for FILE in work/normalized/*.mp4
           do
+
+            echo ""
             echo "========================================"
             echo "$FILE"
             echo "========================================"
-            ffprobe -v error \
-              -show_entries format=duration,size \
-              -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
+
+            ffprobe \
+              -v error \
+              -show_entries \
+              format=duration,size \
+              -show_entries \
+              stream=codec_name,width,height,r_frame_rate,pix_fmt \
               -of default=noprint_wrappers=1 \
               "$FILE"
+
           done
 
+      # ============================================================
+      # 13. CREATE CONCAT LIST
+      # ============================================================
       - name: Create concat list
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cat > work/concat.txt <<'EOF'
           file 'normalized/scene_01.mp4'
@@ -171,13 +391,25 @@ jobs:
           file 'normalized/scene_04.mp4'
           EOF
 
+          echo "Concat list:"
           cat work/concat.txt
 
-      - name: Merge four scenes into 16 second visual sequence
+      # ============================================================
+      # 14. MERGE FOUR SCENES
+      #
+      # 4 x 4 sec = approximately 16 seconds
+      # ============================================================
+      - name: Merge scenes into 16 second sequence
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ffmpeg -y \
+          echo "========================================"
+          echo "MERGING FOUR SCENES"
+          echo "========================================"
+
+          ffmpeg \
+            -y \
             -f concat \
             -safe 0 \
             -i work/concat.txt \
@@ -189,17 +421,37 @@ jobs:
             -movflags +faststart \
             work/merged_16sec.mp4
 
-          ffprobe -v error \
-            -show_entries format=duration,size \
-            -show_entries stream=width,height,r_frame_rate \
+          echo ""
+          echo "Merged video information:"
+
+          ffprobe \
+            -v error \
+            -show_entries \
+            format=duration,size \
+            -show_entries \
+            stream=codec_name,width,height,r_frame_rate,pix_fmt \
             -of default=noprint_wrappers=1 \
             work/merged_16sec.mp4
 
-      - name: Create exactly 60 second silent video
+      # ============================================================
+      # 15. CREATE 60 SECOND VIDEO
+      #
+      # Current test architecture:
+      # 16 sec visual sequence loops to 60 sec.
+      #
+      # Later production version can use more scenes.
+      # ============================================================
+      - name: Create 60 second silent video
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ffmpeg -y \
+          echo "========================================"
+          echo "CREATING 60 SECOND VIDEO"
+          echo "========================================"
+
+          ffmpeg \
+            -y \
             -stream_loop -1 \
             -i work/merged_16sec.mp4 \
             -t 60 \
@@ -211,35 +463,84 @@ jobs:
             -movflags +faststart \
             work/video_60sec_silent.mp4
 
-          ffprobe -v error \
-            -show_entries format=duration,size \
-            -show_entries stream=width,height,r_frame_rate \
+          echo ""
+          echo "60-second video information:"
+
+          ffprobe \
+            -v error \
+            -show_entries \
+            format=duration,size \
+            -show_entries \
+            stream=codec_name,width,height,r_frame_rate,pix_fmt \
             -of default=noprint_wrappers=1 \
             work/video_60sec_silent.mp4
 
+      # ============================================================
+      # 16. CREATE TEMPORARY PYTHON ENVIRONMENT
+      #
+      # This is NOT a persistent Python worker/server.
+      # It exists only during this GitHub Actions job.
+      # ============================================================
       - name: Install free TTS engine
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          python3 -m venv work/tts-venv
-          work/tts-venv/bin/pip install --disable-pip-version-check --no-cache-dir edge-tts
+          echo "Creating temporary TTS environment..."
+
+          python3 \
+            -m venv \
+            work/tts-venv
+
+          work/tts-venv/bin/python \
+            -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            edge-tts
+
           work/tts-venv/bin/edge-tts --version
 
+      # ============================================================
+      # 17. GENERATE VOICEOVER
+      # ============================================================
       - name: Generate voiceover and subtitles
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          jq -r '.voiceover' work/video_plan.json > work/voiceover.txt
-          jq -r '.title' work/video_plan.json | cut -c1-70 > work/title.txt
+          echo "========================================"
+          echo "GENERATING VOICEOVER"
+          echo "========================================"
 
-          test -s work/voiceover.txt
-          test -s work/title.txt
+          jq -r '.voiceover // empty' \
+            work/video_plan.json \
+            > work/voiceover.txt
 
-          echo "Voiceover text:"
-          cat work/voiceover.txt
+          jq -r '.title // empty' \
+            work/video_plan.json \
+            | cut -c1-70 \
+            > work/title.txt
+
+          if [ ! -s "work/voiceover.txt" ]; then
+            echo "ERROR: Voiceover text is empty."
+            exit 1
+          fi
+
+          if [ ! -s "work/title.txt" ]; then
+            echo "ERROR: Title is empty."
+            exit 1
+          fi
+
           echo ""
-          echo "Title:"
+          echo "VOICEOVER:"
+          cat work/voiceover.txt
+
+          echo ""
+          echo "TITLE:"
           cat work/title.txt
+
+          echo ""
+          echo "Generating TTS..."
 
           work/tts-venv/bin/edge-tts \
             --file work/voiceover.txt \
@@ -250,26 +551,71 @@ jobs:
           test -s work/voice.mp3
           test -s work/voice.srt
 
+          echo ""
           echo "Voiceover generated."
-          ls -lh work/voice.mp3 work/voice.srt
 
-      - name: Inspect voiceover duration
+          ls -lh \
+            work/voice.mp3 \
+            work/voice.srt
+
+      # ============================================================
+      # 18. INSPECT AUDIO
+      # ============================================================
+      - name: Inspect voiceover
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ffprobe -v error \
-            -show_entries format=duration,size \
+          echo "========================================"
+          echo "VOICEOVER INFORMATION"
+          echo "========================================"
+
+          ffprobe \
+            -v error \
+            -show_entries \
+            format=duration,size \
             -of default=noprint_wrappers=1 \
             work/voice.mp3
 
-      - name: Render final 60 second video with voice and text
+      # ============================================================
+      # 19. RENDER FINAL VIDEO
+      #
+      # Includes:
+      # - title
+      # - subtitles
+      # - voiceover
+      # - 60 sec video
+      # ============================================================
+      - name: Render final video
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ffmpeg -y \
+          FINAL="output/job_${JOB_ID}_final.mp4"
+
+          echo "========================================"
+          echo "RENDERING FINAL VIDEO"
+          echo "========================================"
+
+          ffmpeg \
+            -y \
             -i work/video_60sec_silent.mp4 \
             -i work/voice.mp3 \
-            -filter_complex "[0:v]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=work/title.txt:fontcolor=white:fontsize=42:box=1:boxcolor=black@0.45:boxborderw=18:x=(w-text_w)/2:y=55,subtitles=work/voice.srt:force_style='FontName=DejaVu Sans,FontSize=18,Alignment=2,MarginV=150,Outline=2'[v];[1:a]apad,atrim=duration=60[a]" \
+            -filter_complex "\
+          [0:v]drawtext=\
+          fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:\
+          textfile=work/title.txt:\
+          fontcolor=white:\
+          fontsize=42:\
+          box=1:\
+          boxcolor=black@0.45:\
+          boxborderw=18:\
+          x=(w-text_w)/2:\
+          y=55,\
+          subtitles=work/voice.srt:\
+          force_style='FontName=DejaVu Sans,FontSize=18,Alignment=2,MarginV=150,Outline=2'\
+          [v];\
+          [1:a]apad,atrim=duration=60[a]" \
             -map "[v]" \
             -map "[a]" \
             -t 60 \
@@ -280,49 +626,112 @@ jobs:
             -c:a aac \
             -b:a 128k \
             -movflags +faststart \
-            "output/job_${JOB_ID}_final.mp4"
-
-      - name: Verify final video
-        run: |
-          set -e
-
-          FINAL="output/job_${JOB_ID}_final.mp4"
+            "$FINAL"
 
           test -s "$FINAL"
 
-          echo "========================================"
-          echo "FINAL VIDEO"
-          echo "========================================"
-
-          ffprobe -v error \
-            -show_entries format=duration,size \
-            -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt \
-            -of default=noprint_wrappers=1 \
-            "$FINAL"
-
+          echo ""
+          echo "Final video created:"
           ls -lh "$FINAL"
 
-      - name: Upload final video to Google Drive
+      # ============================================================
+      # 20. VERIFY FINAL VIDEO
+      # ============================================================
+      - name: Verify final video
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           FINAL="output/job_${JOB_ID}_final.mp4"
 
-          rclone copy \
+          echo "========================================"
+          echo "FINAL VIDEO VERIFICATION"
+          echo "========================================"
+
+          test -s "$FINAL"
+
+          ffprobe \
+            -v error \
+            -show_entries \
+            format=duration,size \
+            -show_entries \
+            stream=codec_name,width,height,r_frame_rate,pix_fmt \
+            -of default=noprint_wrappers=1 \
+            "$FINAL"
+
+          echo ""
+          echo "Final file:"
+          ls -lh "$FINAL"
+
+      # ============================================================
+      # 21. UPLOAD FINAL VIDEO TO GOOGLE DRIVE
+      # ============================================================
+      - name: Upload final video to Google Drive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FINAL="output/job_${JOB_ID}_final.mp4"
+
+          echo "========================================"
+          echo "UPLOADING FINAL VIDEO"
+          echo "========================================"
+
+          rclone \
+            --config "$RCLONE_FILE" \
+            copy \
             "$FINAL" \
             "$RENDER_DEST" \
             --progress
 
+          echo ""
           echo "========================================"
-          echo "FINAL VIDEO UPLOADED TO DRIVE"
+          echo "VERIFYING DRIVE UPLOAD"
           echo "========================================"
 
-          rclone lsf "$RENDER_DEST" \
+          rclone \
+            --config "$RCLONE_FILE" \
+            lsf \
+            "$RENDER_DEST" \
             --include "job_${JOB_ID}_final.mp4"
 
-      - name: Upload GitHub artifact
+          echo ""
+          echo "FINAL VIDEO UPLOADED SUCCESSFULLY."
+
+      # ============================================================
+      # 22. UPLOAD GITHUB ARTIFACT
+      #
+      # Useful for debugging/testing.
+      # Automatically expires after 7 days.
+      # ============================================================
+      - name: Upload final video as GitHub artifact
         uses: actions/upload-artifact@v4
         with:
           name: ai-video-${{ inputs.job_id }}
           path: output/job_${{ inputs.job_id }}_final.mp4
+          if-no-files-found: error
           retention-days: 7
+
+      # ============================================================
+      # 23. FINAL SUCCESS MESSAGE
+      # ============================================================
+      - name: Pipeline complete
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo ""
+          echo "================================================"
+          echo "          AI VIDEO PIPELINE COMPLETE"
+          echo "================================================"
+          echo ""
+          echo "Job ID:"
+          echo "$JOB_ID"
+          echo ""
+          echo "Final video:"
+          echo "job_${JOB_ID}_final.mp4"
+          echo ""
+          echo "Google Drive:"
+          echo "$RENDER_DEST"
+          echo ""
+          echo "================================================"
