@@ -9,9 +9,6 @@ jobs:
 
     steps:
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Install FFmpeg
         run: |
           sudo apt-get update
@@ -44,13 +41,8 @@ jobs:
 
       - name: Check output
         run: |
-          echo "Input video:"
           ls -lh input.mp4
-
-          echo "Output video:"
           ls -lh output.mp4
-
-          echo "Video information:"
           ffprobe -v error \
             -show_entries format=duration,size \
             -show_entries stream=codec_name,width,height \
